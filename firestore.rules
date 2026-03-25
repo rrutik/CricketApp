@@ -1,0 +1,55 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isDocOwner() {
+      return isAuthenticated() && request.auth.uid == resource.data.uid;
+    }
+
+    function uidUnchanged() {
+      return !('uid' in request.resource.data) || request.resource.data.uid == request.auth.uid;
+    }
+
+    function uidNotModified() {
+      return !('uid' in request.resource.data) || request.resource.data.uid == resource.data.uid;
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+    function isValidMatch(data) {
+      return data.uid is string && data.uid.size() > 0 &&
+             data.date is string && data.date.size() > 0 && data.date.size() < 50 &&
+             data.teamA is string && data.teamA.size() > 0 && data.teamA.size() < 50 &&
+             data.teamB is string && data.teamB.size() > 0 && data.teamB.size() < 50 &&
+             data.totalOvers is number && data.totalOvers > 0 &&
+             data.innings1 is map && data.innings1.keys().hasAll(['runs', 'wickets', 'balls', 'team']) &&
+             data.innings1.runs is number && data.innings1.wickets is number && data.innings1.balls is number && data.innings1.team is string &&
+             (!('innings2' in data) || (data.innings2 is map && data.innings2.keys().hasAll(['runs', 'wickets', 'balls', 'team']) && data.innings2.runs is number && data.innings2.wickets is number && data.innings2.balls is number && data.innings2.team is string)) &&
+             (!('winner' in data) || (data.winner is string && data.winner.size() < 50)) &&
+             (!('resultMessage' in data) || (data.resultMessage is string && data.resultMessage.size() < 200)) &&
+             data.createdAt is number;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+    match /matches/{matchId} {
+      allow read: if isDocOwner();
+      allow create: if isAuthenticated() && hasRequiredFields(['uid', 'date', 'teamA', 'teamB', 'totalOvers', 'innings1', 'createdAt']) && isValidMatch(request.resource.data) && uidUnchanged();
+      allow update: if isDocOwner() && isValidMatch(request.resource.data) && uidNotModified();
+      allow delete: if isDocOwner();
+    }
+  }
+}

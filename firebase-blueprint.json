@@ -1,0 +1,72 @@
+{
+  "entities": {
+    "MatchRecord": {
+      "title": "MatchRecord",
+      "description": "A cricket match record containing scores and results",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "The user ID of the match owner"
+        },
+        "date": {
+          "type": "string",
+          "description": "The date the match was played"
+        },
+        "teamA": {
+          "type": "string",
+          "description": "Name of Team A"
+        },
+        "teamB": {
+          "type": "string",
+          "description": "Name of Team B"
+        },
+        "totalOvers": {
+          "type": "number",
+          "description": "Total overs for the match"
+        },
+        "innings1": {
+          "type": "object",
+          "description": "First innings score details",
+          "properties": {
+            "runs": { "type": "number" },
+            "wickets": { "type": "number" },
+            "balls": { "type": "number" },
+            "team": { "type": "string" }
+          },
+          "required": ["runs", "wickets", "balls", "team"]
+        },
+        "innings2": {
+          "type": "object",
+          "description": "Second innings score details (optional)",
+          "properties": {
+            "runs": { "type": "number" },
+            "wickets": { "type": "number" },
+            "balls": { "type": "number" },
+            "team": { "type": "string" }
+          },
+          "required": ["runs", "wickets", "balls", "team"]
+        },
+        "winner": {
+          "type": "string",
+          "description": "The winning team or 'Tie'"
+        },
+        "resultMessage": {
+          "type": "string",
+          "description": "A message summarizing the result"
+        },
+        "createdAt": {
+          "type": "number",
+          "description": "Timestamp of creation"
+        }
+      },
+      "required": ["uid", "date", "teamA", "teamB", "totalOvers", "innings1", "createdAt"]
+    }
+  },
+  "firestore": {
+    "matches/{matchId}": {
+      "schema": "MatchRecord",
+      "description": "Stores match records for users"
+    }
+  }
+}
