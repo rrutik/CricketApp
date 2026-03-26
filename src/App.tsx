@@ -3,7 +3,69 @@ import { RotateCcw, RotateCw, Trophy, Play, ChevronRight, User, LogIn, LogOut, S
 import { motion, AnimatePresence } from 'motion/react';
 import { auth, db, googleProvider } from './firebase';
 import { signInWithPopup, signOut, onAuthStateChanged } from 'firebase/auth';
-import { collection, addDoc, query, where, orderBy, onSnapshot, limit, serverTimestamp } from 'firebase/firestore';
+import { collection, addDoc, query, where, orderBy, onSnapshot, limit, serverTimestamp, doc, setDoc, getDoc } from 'firebase/firestore';
+
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId: string | undefined;
+    email: string | null | undefined;
+    emailVerified: boolean | undefined;
+    isAnonymous: boolean | undefined;
+    tenantId: string | null | undefined;
+    providerInfo: {
+      providerId: string;
+      displayName: string | null;
+      email: string | null;
+      photoUrl: string | null;
+    }[];
+  }
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo: auth.currentUser?.providerData.map(provider => ({
+        providerId: provider.providerId,
+        displayName: provider.displayName,
+        email: provider.email,
+        photoUrl: provider.photoURL
+      })) || []
+    },
+    operationType,
+    path
+  }
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
+
+async function testConnection() {
+  try {
+    await getDoc(doc(db, 'test', 'connection'));
+  } catch (error) {
+    if(error instanceof Error && error.message.includes('the client is offline')) {
+      console.error("Please check your Firebase configuration. ");
+    }
+  }
+}
+testConnection();
 
 type Ball = {
   runs: number;
@@ -25,7 +87,7 @@ type MatchRecord = {
   resultMessage?: string;
 };
 
-type AppView = 'login' | 'dashboard' | 'setup' | 'match';
+type AppView = 'login' | 'role_select' | 'dashboard' | 'setup' | 'match' | 'viewer_setup' | 'viewer_match';
 
 export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -34,9 +96,13 @@ export default function App() {
   const [currentView, setCurrentView] = useState<AppView>('login');
   const [matchHistory, setMatchHistory] = useState<MatchRecord[]>([]);
   
+  const [role, setRole] = useState<'scorer' | 'viewer' | null>(null);
+  const [viewerScorerId, setViewerScorerId] = useState('');
+  const [liveMatchData, setLiveMatchData] = useState<any>(null);
+
   const [teamA, setTeamA] = useState('Team A');
   const [teamB, setTeamB] = useState('Team B');
-  const [totalOvers, setTotalOvers] = useState<number>(5);
+  const [totalOvers, setTotalOvers] = useState<number | ''>(5);
   const [tossWinner, setTossWinner] = useState<1 | 2>(1);
   const [optedTo, setOptedTo] = useState<'bat' | 'bowl'>('bat');
   
@@ -67,17 +133,32 @@ export default function App() {
         setUserId(user.uid);
         setUserType('user');
         setIsLoggedIn(true);
-        setCurrentView('dashboard');
+        const savedState = localStorage.getItem('cricscore_current_match');
+        if (savedState) {
+          const state = JSON.parse(savedState);
+          if (state.isMatchStarted && !state.isMatchOver) {
+            setCurrentView('match');
+            setRole('scorer');
+            return;
+          }
+        }
+        setCurrentView((prev) => prev === 'login' ? 'role_select' : prev);
       } else {
         setUserId(null);
-        if (userType === 'user') {
-          setIsLoggedIn(false);
-          setCurrentView('login');
-        }
+        // Only reset to login if they were a logged-in user, not a guest
+        setUserType((prevType) => {
+          if (prevType === 'user') {
+            setIsLoggedIn(false);
+            setRole(null);
+            setCurrentView('login');
+            return null;
+          }
+          return prevType;
+        });
       }
     });
     return () => unsubscribe();
-  }, [userType]);
+  }, []);
 
   useEffect(() => {
     if (userId) {
@@ -94,7 +175,7 @@ export default function App() {
         });
         setMatchHistory(matches);
       }, (error) => {
-        console.error("Error fetching matches: ", error);
+        handleFirestoreError(error, OperationType.LIST, 'matches');
       });
       return () => unsubscribe();
     } else {
@@ -142,10 +223,37 @@ export default function App() {
         runs, wickets, balls, history, redoStack, firstInningsScore
       };
       localStorage.setItem('cricscore_current_match', JSON.stringify(state));
+      
+      if (role === 'scorer' && userId) {
+        setDoc(doc(db, 'live_matches', userId), state).catch(err => {
+          handleFirestoreError(err, OperationType.WRITE, `live_matches/${userId}`);
+        });
+      }
     } else {
       localStorage.removeItem('cricscore_current_match');
+      if (role === 'scorer' && userId) {
+        // We could delete the live match or leave it. Leaving it is fine, or we can clear it.
+        // Let's clear it when match is not started.
+        // Actually, maybe we shouldn't delete it immediately, but it's fine.
+      }
     }
-  }, [isMatchStarted, isMatchOver, runs, wickets, balls, history, redoStack, currentInnings, battingTeam, teamA, teamB, totalOvers, tossWinner, optedTo, firstInningsScore]);
+  }, [isMatchStarted, isMatchOver, runs, wickets, balls, history, redoStack, currentInnings, battingTeam, teamA, teamB, totalOvers, tossWinner, optedTo, firstInningsScore, role, userId]);
+
+  useEffect(() => {
+    if (currentView === 'viewer_match' && viewerScorerId) {
+      const unsubscribe = onSnapshot(doc(db, 'live_matches', viewerScorerId), (docSnap) => {
+        if (docSnap.exists()) {
+          setLiveMatchData(docSnap.data());
+        } else {
+          setLiveMatchData(null);
+        }
+      }, (error) => {
+        handleFirestoreError(error, OperationType.GET, `live_matches/${viewerScorerId}`);
+        setLiveMatchData(null);
+      });
+      return () => unsubscribe();
+    }
+  }, [currentView, viewerScorerId]);
 
   const timelineRef = React.useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -186,7 +294,7 @@ export default function App() {
           createdAt: Date.now()
         });
       } catch (error) {
-        console.error("Error saving match: ", error);
+        handleFirestoreError(error, OperationType.CREATE, 'matches');
       }
     } else {
       const localRecord: MatchRecord = {
@@ -198,6 +306,23 @@ export default function App() {
   };
 
   const startMatch = () => {
+    // Ensure totalOvers is a valid number before starting
+    const finalOvers = totalOvers === '' || totalOvers < 1 ? 1 : totalOvers;
+    setTotalOvers(finalOvers);
+
+    // Reset match state for a new match
+    setRuns(0);
+    setWickets(0);
+    setBalls(0);
+    setHistory([]);
+    setRedoStack([]);
+    setCurrentInnings(1);
+    setFirstInningsScore(null);
+    setIsMatchOver(false);
+    setIsNbMode(false);
+    setShowHistory(false);
+    setEditingBallIndex(null);
+
     if (optedTo === 'bat') {
       setBattingTeam(tossWinner);
     } else {
@@ -458,17 +583,31 @@ export default function App() {
     if (type === 'user') {
       try {
         await signInWithPopup(auth, googleProvider);
-      } catch (error) {
+      } catch (error: any) {
+        if (error.code === 'auth/popup-closed-by-user') {
+          // User closed the popup, ignore the error
+          return;
+        }
         console.error("Login failed:", error);
       }
     } else {
       setUserType('guest');
       setIsLoggedIn(true);
-      setCurrentView('dashboard');
+      const savedState = localStorage.getItem('cricscore_current_match');
+      if (savedState) {
+        const state = JSON.parse(savedState);
+        if (state.isMatchStarted && !state.isMatchOver) {
+          setCurrentView('match');
+          setRole('scorer');
+          return;
+        }
+      }
+      setCurrentView((prev) => prev === 'login' ? 'role_select' : prev);
     }
   };
 
   const handleLogout = async () => {
+    setRole(null);
     if (userType === 'user') {
       try {
         await signOut(auth);
@@ -529,6 +668,50 @@ export default function App() {
     );
   }
 
+  if (currentView === 'role_select') {
+    return (
+      <div className="min-h-screen bg-white flex flex-col items-center justify-center p-6 font-sans text-zinc-900">
+        <motion.div 
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.4, ease: "easeOut" }}
+          className="w-full max-w-sm flex flex-col items-center"
+        >
+          <div className="w-16 h-16 bg-zinc-900 rounded-2xl flex items-center justify-center mb-8 shadow-xl shadow-zinc-200/50">
+            <Trophy className="w-8 h-8 text-white" />
+          </div>
+          
+          <h1 className="text-3xl font-bold tracking-tight mb-2 text-center">Choose Your Role</h1>
+          <p className="text-zinc-500 text-center mb-10 text-sm">Are you scoring a match or viewing one?</p>
+          
+          <div className="w-full space-y-4">
+            <button 
+              onClick={() => {
+                setRole('scorer');
+                setCurrentView('dashboard');
+              }}
+              className="w-full bg-zinc-900 hover:bg-zinc-800 text-white font-medium py-4 px-6 rounded-xl transition-all flex items-center justify-center gap-3 shadow-sm"
+            >
+              <ShieldCheck className="w-5 h-5" />
+              I want to Score a Match
+            </button>
+            
+            <button 
+              onClick={() => {
+                setRole('viewer');
+                setCurrentView('viewer_setup');
+              }}
+              className="w-full bg-white hover:bg-zinc-50 text-zinc-900 border border-zinc-200 font-medium py-4 px-6 rounded-xl transition-all flex items-center justify-center gap-3 shadow-sm"
+            >
+              <User className="w-5 h-5" />
+              I want to View a Match
+            </button>
+          </div>
+        </motion.div>
+      </div>
+    );
+  }
+
   if (currentView === 'dashboard') {
     return (
       <div className="min-h-screen bg-white flex flex-col font-sans text-zinc-900">
@@ -547,6 +730,25 @@ export default function App() {
         </header>
 
         <main className="flex-1 px-6 pb-6 space-y-6 max-w-md mx-auto w-full">
+          {/* Scorer ID Banner */}
+          {role === 'scorer' && (
+            <div className="bg-zinc-50 border border-zinc-200 rounded-2xl p-5 flex flex-col items-center text-center">
+              <h3 className="text-sm font-bold text-zinc-900 mb-1">Your Scorer ID</h3>
+              {userId ? (
+                <>
+                  <p className="text-xs text-zinc-500 mb-3">Share this ID with viewers to let them watch your match live.</p>
+                  <div className="bg-white border border-zinc-200 px-4 py-2 rounded-lg text-lg font-mono font-bold tracking-widest text-zinc-900 select-all">
+                    {userId}
+                  </div>
+                </>
+              ) : (
+                <p className="text-xs text-zinc-500">
+                  You are playing as a Guest. <button onClick={() => setCurrentView('login')} className="text-zinc-900 font-semibold hover:underline">Log in</button> to share your live score.
+                </p>
+              )}
+            </div>
+          )}
+
           {/* Create Match Banner */}
           <motion.div 
             whileHover={{ scale: 1.01 }}
@@ -635,6 +837,51 @@ export default function App() {
     );
   }
 
+  if (currentView === 'viewer_setup') {
+    return (
+      <div className="min-h-screen bg-white flex flex-col items-center justify-center p-6 font-sans text-zinc-900">
+        <div className="w-full max-w-md">
+          <button 
+            onClick={() => setCurrentView('role_select')}
+            className="mb-8 flex items-center gap-2 text-zinc-500 hover:text-zinc-900 transition-colors text-sm font-medium"
+          >
+            <ChevronRight className="w-4 h-4 rotate-180" />
+            Back to Roles
+          </button>
+          
+          <h2 className="text-3xl font-bold tracking-tight mb-2">View Live Match</h2>
+          <p className="text-zinc-500 mb-8 text-sm">Enter the Scorer ID to view their live match.</p>
+          
+          <div className="space-y-6">
+            <div className="space-y-2">
+              <label className="text-xs font-bold uppercase tracking-wider text-zinc-500">Scorer ID</label>
+              <input 
+                type="text" 
+                value={viewerScorerId}
+                onChange={(e) => setViewerScorerId(e.target.value)}
+                placeholder="e.g. abc123xyz"
+                className="w-full p-4 bg-zinc-50 border border-zinc-200 rounded-xl focus:ring-2 focus:ring-zinc-900 focus:border-transparent outline-none transition-all font-medium text-lg"
+              />
+            </div>
+            
+            <button 
+              onClick={() => {
+                if (viewerScorerId.trim()) {
+                  setCurrentView('viewer_match');
+                }
+              }}
+              disabled={!viewerScorerId.trim()}
+              className="w-full bg-zinc-900 hover:bg-zinc-800 disabled:bg-zinc-200 disabled:text-zinc-400 text-white font-medium py-4 px-6 rounded-xl transition-all flex items-center justify-center gap-2 shadow-sm"
+            >
+              <Play className="w-5 h-5" />
+              Watch Live
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (currentView === 'setup') {
     return (
       <div className="min-h-screen bg-white flex flex-col items-center justify-center p-6 font-sans text-zinc-900">
@@ -681,7 +928,14 @@ export default function App() {
                     type="number" 
                     min="1"
                     value={totalOvers} 
-                    onChange={e => setTotalOvers(Math.max(1, parseInt(e.target.value) || 1))}
+                    onChange={e => {
+                      const val = e.target.value;
+                      if (val === '') {
+                        setTotalOvers('');
+                      } else {
+                        setTotalOvers(Math.max(1, parseInt(val) || 1));
+                      }
+                    }}
                     className="w-full px-4 py-3 bg-zinc-50 border border-zinc-200 rounded-lg focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900 outline-none transition-all text-sm font-medium text-zinc-900"
                   />
                 </div>
@@ -735,6 +989,221 @@ export default function App() {
             </div>
           </div>
         </div>
+      </div>
+    );
+  }
+
+  if (currentView === 'viewer_match') {
+    if (!liveMatchData) {
+      return (
+        <div className="min-h-screen bg-white flex flex-col items-center justify-center p-6 font-sans text-zinc-900">
+          <div className="w-12 h-12 border-4 border-zinc-200 border-t-zinc-900 rounded-full animate-spin mb-4"></div>
+          <p className="text-zinc-500 font-medium">Waiting for live match data...</p>
+          <button 
+            onClick={() => setCurrentView('viewer_setup')}
+            className="mt-8 text-sm font-medium text-zinc-900 hover:underline"
+          >
+            Go Back
+          </button>
+        </div>
+      );
+    }
+
+    const {
+      teamA: liveTeamA, teamB: liveTeamB, totalOvers: liveTotalOvers, tossWinner: liveTossWinner, optedTo: liveOptedTo,
+      isMatchStarted: liveIsMatchStarted, isMatchOver: liveIsMatchOver, currentInnings: liveCurrentInnings, battingTeam: liveBattingTeam,
+      runs: liveRuns, wickets: liveWickets, balls: liveBalls, history: liveHistory, redoStack: liveRedoStack, firstInningsScore: liveFirstInningsScore
+    } = liveMatchData;
+
+    const liveBattingTeamName = liveBattingTeam === 1 ? liveTeamA : liveTeamB;
+    const liveBowlingTeamName = liveBattingTeam === 1 ? liveTeamB : liveTeamA;
+
+    type TimelineBall = Ball & { isUndone?: boolean };
+    const liveOversList: TimelineBall[][] = [[]];
+    let legalBallsInCurrentOver = 0;
+    
+    const fullTimeline: TimelineBall[] = [
+      ...liveHistory,
+      ...[...(liveRedoStack || [])].reverse().map(b => ({ ...b, isUndone: true }))
+    ];
+
+    fullTimeline.forEach(ball => {
+      if (legalBallsInCurrentOver === 6) {
+        liveOversList.push([]);
+        legalBallsInCurrentOver = 0;
+      }
+      liveOversList[liveOversList.length - 1].push(ball);
+      if (ball.isLegal && !ball.isUndone) {
+        legalBallsInCurrentOver++;
+      }
+    });
+
+    return (
+      <div className="min-h-screen bg-white flex flex-col font-sans text-zinc-900">
+        {/* Header */}
+        <header className="px-6 py-5 flex justify-between items-center sticky top-0 z-20 bg-white border-b border-zinc-200">
+          <div className="flex items-center gap-3">
+            <button 
+              onClick={() => setCurrentView('viewer_setup')}
+              className="p-2 rounded-lg text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 transition-colors"
+              title="Exit Live View"
+            >
+              <RotateCcw className="w-4 h-4 rotate-180" />
+            </button>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></span>
+                <span className="text-[10px] font-bold text-red-500 uppercase tracking-widest">Live</span>
+              </div>
+              <h2 className="text-lg font-bold leading-tight tracking-tight text-zinc-900">{liveBattingTeamName}</h2>
+              <p className="text-zinc-500 text-xs font-medium mt-0.5">vs {liveBowlingTeamName}</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-3">
+            <div className="bg-zinc-900 px-3 py-1.5 rounded-lg">
+              <span className="text-xs text-white font-medium">
+                INNINGS {liveCurrentInnings}
+              </span>
+            </div>
+          </div>
+        </header>
+
+        <main className="flex-1 p-4 max-w-md w-full mx-auto flex flex-col gap-4 relative z-10">
+          {/* Score Card */}
+          <div className="bg-white border border-zinc-200 rounded-xl p-8 flex flex-col items-center justify-center relative overflow-hidden">
+            <div className="text-zinc-400 text-[10px] font-semibold mb-2 uppercase tracking-widest">Total Score</div>
+            <div className="flex items-baseline gap-1">
+              <span className="text-6xl leading-none font-bold text-zinc-900 tracking-tighter">{liveRuns}</span>
+              <span className="text-4xl font-light text-zinc-300 mx-1">/</span>
+              <span className="text-5xl font-semibold text-zinc-500">{liveWickets}</span>
+            </div>
+            
+            <div className="mt-8 flex items-center gap-6 w-full justify-center bg-zinc-50 rounded-lg py-4 border border-zinc-100">
+              <div className="flex-1 text-center">
+                <div className="text-zinc-400 text-[10px] uppercase tracking-widest font-semibold mb-1">Overs</div>
+                <div className="text-2xl font-bold text-zinc-900">{formatOvers(liveBalls)}</div>
+              </div>
+              <div className="w-px h-10 bg-zinc-200"></div>
+              <div className="flex-1 text-center">
+                <div className="text-zinc-400 text-[10px] uppercase tracking-widest font-semibold mb-1">Run Rate</div>
+                <div className="text-2xl font-bold text-zinc-900">
+                  {liveBalls > 0 ? ((liveRuns / liveBalls) * 6).toFixed(2) : '0.00'}
+                </div>
+              </div>
+            </div>
+
+            {/* Innings Progress */}
+            <div className="mt-6 w-full">
+              <div className="flex justify-between text-[10px] font-semibold text-zinc-500 uppercase tracking-widest mb-2">
+                <span>Innings Progress</span>
+                <span>{liveBalls} / {liveTotalOvers * 6} Balls</span>
+              </div>
+              <div className="flex gap-1 w-full h-1.5">
+                {Array.from({ length: liveTotalOvers }).map((_, overIdx) => {
+                  const legalBallsInThisOver = Math.max(0, Math.min(6, liveBalls - (overIdx * 6)));
+                  const fillPercentage = (legalBallsInThisOver / 6) * 100;
+                  
+                  return (
+                    <div key={overIdx} className="flex-1 bg-zinc-100 rounded-full overflow-hidden relative">
+                      <motion.div 
+                        className="absolute top-0 left-0 h-full bg-zinc-900"
+                        initial={{ width: 0 }}
+                        animate={{ width: `${fillPercentage}%` }}
+                        transition={{ duration: 0.5, ease: "easeOut" }}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {liveCurrentInnings === 2 && liveFirstInningsScore && (
+              <div className="mt-6 pt-6 border-t border-zinc-100 w-full text-center">
+                <p className="text-sm font-medium text-zinc-500 uppercase tracking-wider">
+                  Target <span className="text-zinc-900 font-bold text-xl ml-2">{liveFirstInningsScore.runs + 1}</span>
+                </p>
+                {!liveIsMatchOver && (
+                  <div className="mt-3 inline-block bg-zinc-50 border border-zinc-200 px-4 py-2 rounded-lg">
+                    <p className="text-xs font-semibold text-zinc-700 tracking-wide">
+                      Need {Math.max(0, liveFirstInningsScore.runs + 1 - liveRuns)} runs from {liveTotalOvers * 6 - liveBalls} balls
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
+            
+            {liveIsMatchOver && (
+              <div className="mt-6 pt-6 border-t border-zinc-100 w-full text-center">
+                <div className="inline-flex items-center gap-2 bg-zinc-900 text-white px-6 py-4 rounded-xl text-sm font-bold w-full justify-center uppercase tracking-wider">
+                  <Trophy className="w-5 h-5" />
+                  {liveRuns > (liveFirstInningsScore?.runs || 0) 
+                    ? `${liveBattingTeamName} Won by ${10 - liveWickets} wickets!` 
+                    : liveRuns === (liveFirstInningsScore?.runs || 0) 
+                      ? "Match Tied!" 
+                      : `${liveBowlingTeamName} Won by ${liveFirstInningsScore!.runs - liveRuns} runs!`}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Innings Timeline */}
+          <div className="bg-white border border-zinc-200 rounded-xl p-4">
+            <div className="flex justify-between items-center mb-3">
+              <div className="text-[10px] font-semibold text-zinc-500 uppercase tracking-widest">Innings Timeline</div>
+              <div className="text-[10px] font-medium text-zinc-400">{liveHistory.length} balls</div>
+            </div>
+            <div 
+              className="flex gap-3 min-h-[40px] items-center overflow-x-auto pb-2 scrollbar-hide snap-x scroll-smooth"
+            >
+              {liveOversList.map((over, overIdx) => {
+                const legalBalls = over.filter(b => b.isLegal).length;
+                const showEmptySlots = overIdx === liveOversList.length - 1 && !liveIsMatchOver && liveWickets < 10 && liveBalls < liveTotalOvers * 6;
+                const emptySlotsCount = showEmptySlots ? Math.max(0, 6 - legalBalls) : 0;
+
+                return (
+                  <div key={overIdx} className="flex gap-2 items-center snap-end">
+                    {over.length === 0 && overIdx === 0 && emptySlotsCount > 0 && (
+                      <span className="text-zinc-400 text-xs font-medium italic mr-2 whitespace-nowrap">Waiting for first ball...</span>
+                    )}
+                    
+                    {over.map((ball, idx) => (
+                      <motion.div 
+                        initial={{ scale: 0, opacity: 0 }}
+                        animate={{ scale: 1, opacity: ball.isUndone ? 0.4 : 1 }}
+                        key={`ball-${overIdx}-${idx}`} 
+                        className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-xs font-semibold
+                          ${ball.isUndone ? 'bg-zinc-100 text-zinc-400 border border-dashed border-zinc-300' :
+                            ball.isWicket ? 'bg-red-100 text-red-700 border border-red-200' : 
+                            ball.label === '4' || ball.label === '6' ? 'bg-green-100 text-green-700 border border-green-200' : 
+                            !ball.isLegal ? 'bg-orange-50 text-orange-700 border border-orange-200' :
+                            ball.runs === 0 ? 'bg-zinc-50 text-zinc-400 border border-zinc-200' : 'bg-white text-zinc-900 border border-zinc-200'}
+                        `}
+                      >
+                        {ball.label}
+                      </motion.div>
+                    ))}
+                    
+                    {Array.from({ length: emptySlotsCount }).map((_, idx) => (
+                      <div key={`empty-${overIdx}-${idx}`} className="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center border border-dashed border-zinc-200 bg-zinc-50">
+                        <div className="w-1 h-1 rounded-full bg-zinc-300"></div>
+                      </div>
+                    ))}
+
+                    {overIdx < liveOversList.length - 1 && (
+                      <div className="w-px h-6 bg-zinc-200 mx-1 flex-shrink-0"></div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {(liveWickets >= 10 || liveBalls >= liveTotalOvers * 6) && liveCurrentInnings === 1 && !liveIsMatchOver && (
+            <div className="bg-zinc-900 text-white p-4 rounded-xl text-center text-sm font-bold uppercase tracking-wider">
+              Innings Over! Waiting for scorer to start next innings.
+            </div>
+          )}
+        </main>
       </div>
     );
   }

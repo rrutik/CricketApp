@@ -42,6 +42,24 @@ service cloud.firestore {
              data.createdAt is number;
     }
 
+    function isValidLiveMatch(data) {
+      return data.teamA is string && data.teamA.size() < 50 &&
+             data.teamB is string && data.teamB.size() < 50 &&
+             data.totalOvers is number &&
+             data.tossWinner is number &&
+             data.optedTo is string && data.optedTo.size() < 10 &&
+             data.isMatchStarted is bool &&
+             data.isMatchOver is bool &&
+             data.currentInnings is number &&
+             data.battingTeam is number &&
+             data.runs is number &&
+             data.wickets is number &&
+             data.balls is number &&
+             data.history is list && data.history.size() < 1000 &&
+             data.redoStack is list && data.redoStack.size() < 1000 &&
+             (!('firstInningsScore' in data) || data.firstInningsScore == null || (data.firstInningsScore is map && data.firstInningsScore.keys().hasAll(['runs', 'wickets', 'balls', 'team'])));
+    }
+
     // ===============================================================
     // Rules
     // ===============================================================
@@ -50,6 +68,13 @@ service cloud.firestore {
       allow create: if isAuthenticated() && hasRequiredFields(['uid', 'date', 'teamA', 'teamB', 'totalOvers', 'innings1', 'createdAt']) && isValidMatch(request.resource.data) && uidUnchanged();
       allow update: if isDocOwner() && isValidMatch(request.resource.data) && uidNotModified();
       allow delete: if isDocOwner();
+    }
+
+    match /live_matches/{scorerId} {
+      allow read: if true; // Anyone can view a live match if they have the ID
+      allow create: if isAuthenticated() && request.auth.uid == scorerId && isValidLiveMatch(request.resource.data);
+      allow update: if isAuthenticated() && request.auth.uid == scorerId && isValidLiveMatch(request.resource.data);
+      allow delete: if isAuthenticated() && request.auth.uid == scorerId;
     }
   }
 }
