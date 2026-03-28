@@ -57,6 +57,7 @@ service cloud.firestore {
              data.balls is number &&
              data.history is list && data.history.size() < 1000 &&
              data.redoStack is list && data.redoStack.size() < 1000 &&
+             (!('matchCode' in data) || data.matchCode == null || data.matchCode is string) &&
              (!('firstInningsScore' in data) || data.firstInningsScore == null || (data.firstInningsScore is map && data.firstInningsScore.keys().hasAll(['runs', 'wickets', 'balls', 'team'])));
     }
 
@@ -72,9 +73,9 @@ service cloud.firestore {
 
     match /live_matches/{scorerId} {
       allow read: if true; // Anyone can view a live match if they have the ID
-      allow create: if isAuthenticated() && request.auth.uid == scorerId && isValidLiveMatch(request.resource.data);
-      allow update: if isAuthenticated() && request.auth.uid == scorerId && isValidLiveMatch(request.resource.data);
-      allow delete: if isAuthenticated() && request.auth.uid == scorerId;
+      allow create: if isValidLiveMatch(request.resource.data);
+      allow update: if isValidLiveMatch(request.resource.data);
+      allow delete: if true;
     }
   }
 }

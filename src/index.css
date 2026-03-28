@@ -1,6 +1,34 @@
 @import "tailwindcss";
 
 @theme {
+  --color-primary-navy: #0D1A63;
+  --color-primary-blue: #1A2CA3;
+  --color-primary-bright: #2845D6;
+  
+  --color-accent-orange: #F68048;
+  
+  --color-bg-main: #F8FAFC;
+  --color-bg-card: #FFFFFF;
+  --color-bg-muted: #EEF2F7;
+  
+  --color-text-primary: #0D1A63;
+  --color-text-secondary: #4B5563;
+  --color-text-light: #9CA3AF;
+  --color-text-white: #FFFFFF;
+  
+  --color-status-live: #22C55E;
+  --color-status-wicket: #EF4444;
+  --color-status-warning: #F59E0B;
+  
+  --color-btn-run-bg: #FFFFFF;
+  --color-btn-run-border: #E5E7EB;
+  --color-btn-wide-bg: #DBEAFE;
+  --color-btn-noball-bg: #FFEAD5;
+  --color-btn-wicket-bg: #FEE2E2;
+  
+  --color-border-default: #E5E7EB;
+  --color-border-light: #F1F5F9;
+
   --animate-blob: blob 7s infinite;
   
   @keyframes blob {
